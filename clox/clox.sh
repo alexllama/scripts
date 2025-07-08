@@ -1,98 +1,71 @@
 #!/bin/bash
 
 CITIES_FILE="./cities.json"
+WEATHER_UPDATE_INTERVAL=180  # 3 hours in minutes
+TIME_UPDATE_INTERVAL=1       # 1 minute
 
-# Initialize a counter to track minutes for weather updates
-weather_update_counter=180 # Set to 180 to force update on first run
+# Colors (cycle through a few)
+COLORS=("\033[0;31m" "\033[0;32m" "\033[0;34m" "\033[1;33m" "\033[0;35m" "\033[0;36m")
+NC="\033[0m"
 
-# Declare arrays to hold data
-declare -a names
-declare -a tzs
-declare -a times
-declare -a weathers
+WEATHER_CACHE_DIR="/tmp/clox_weather_cache_simple"
+mkdir -p "$WEATHER_CACHE_DIR"
 
-while true; do
-    # --- Weather Update (every 3 hours) ---
-    if (( weather_update_counter >= 180 )); then
-        # Read city data into arrays
-        mapfile -t names < <(jq -r '.[].name' "$CITIES_FILE")
+weather_update_counter=180
+last_weather_update=""
+
+# Fetch weather with caching
+fetch_weather() {
+    local wttrname="$1"
+    local displayname="$2"
+    local cache_file="$WEATHER_CACHE_DIR/${wttrname// /_}"
+    if [[ -f "$cache_file" ]]; then
+        local cache_age=$(($(date +%s) - $(stat -c %Y "$cache_file")))
+        if [[ $cache_age -lt $((WEATHER_UPDATE_INTERVAL*60)) ]]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+    local encoded_city_name=$(printf %s "$wttrname" | jq -s -R -r @uri)
+    local weather_data=$(curl -s --max-time 10 "wttr.in/$encoded_city_name?format=3")
+    # Replace wttrname with displayname in the weather output (only at the start)
+    weather_data=$(echo "$weather_data" | sed "s/^$wttrname/$displayname/")
+    echo "$weather_data" > "$cache_file"
+    echo "$weather_data"
+}
+
+main() {
+    while true; do
+        mapfile -t displaynames < <(jq -r '.[].displayname' "$CITIES_FILE")
+        mapfile -t wttrnames < <(jq -r '.[].wttrname' "$CITIES_FILE")
         mapfile -t tzs < <(jq -r '.[].tz' "$CITIES_FILE")
 
-        # Reset weathers array for fresh data
-        weathers=()
-        # Fetch new weather data
-        for i in "${!names[@]}"; do
-            encoded_city_name=$(printf %s "${names[i]}" | jq -s -R -r @uri)
-            weather_data=$(curl -s "wttr.in/$encoded_city_name?format=%C+%t")
-            weathers+=("$(echo "$weather_data" | xargs)")
+        # Weather update (every 3 hours)
+        if (( weather_update_counter >= WEATHER_UPDATE_INTERVAL )) || [[ -z "$last_weather_update" ]]; then
+            for i in "${!displaynames[@]}"; do
+                fetch_weather "${wttrnames[i]}" "${displaynames[i]}" > /dev/null
+            done
+            last_weather_update=$(date +'%a, %b %d %I:%M %p')
+            weather_update_counter=0
+        fi
+
+        clear
+        echo "-----------------------------"
+        for i in "${!displaynames[@]}"; do
+            color=${COLORS[$((i%${#COLORS[@]}))]}
+            displayname="${displaynames[i]}"
+            wttrname="${wttrnames[i]}"
+            tz="${tzs[i]}"
+            weather=$(cat "$WEATHER_CACHE_DIR/${wttrname// /_}")
+            time=$(TZ="$tz" date +'%a, %b %d %I:%M %p')
+            echo -e "${color}${weather}${NC}"
+            echo -e "${color}${time}${NC}"
+            echo "-----------------------------"
         done
-        # Reset counter
-        weather_update_counter=0
-    fi
-
-    # --- Time Update (every minute) ---
-    times=()
-    for i in "${!names[@]}"; do
-        times+=("$(TZ="${tzs[$i]}" date +'%a, %b %d %I:%M %p')")
+        echo -e "Last weather update: $last_weather_update"
+        ((weather_update_counter++))
+        sleep $((TIME_UPDATE_INTERVAL * 60))
     done
+}
 
-    # --- Display Update (every minute) ---
-    clear
-    num_cities=${#names[@]}
-
-    # --- PASS 1: Calculate maximum column widths across ALL rows ---
-    max_width1=0
-    max_width2=0
-    for ((i=0; i<num_cities; i++)); do
-        len_name=${#names[i]}
-        len_time=${#times[i]}
-        len_weather=${#weathers[i]}
-        max_len=$(( len_name > len_time ? len_name : len_time ))
-        max_len=$(( max_len > len_weather ? max_len : len_weather ))
-
-        if (( i % 2 == 0 )); then # First column city
-            if (( max_len > max_width1 )); then max_width1=$max_len; fi
-        else # Second column city
-            if (( max_len > max_width2 )); then max_width2=$max_len; fi
-        fi
-    done
-
-    # --- PASS 2: Build and print the table using max widths ---
-    for ((i=0; i<num_cities; i+=2)); do
-        has_second_col=0
-        if (( i + 1 < num_cities )); then
-            has_second_col=1
-        fi
-
-        # Build border line
-        border="+-"
-        for ((j=0; j<max_width1; j++)); do border+="-"; done
-        border+="-+"
-        if (( has_second_col )); then
-            for ((j=0; j<max_width2; j++)); do border+="-"; done
-            border+="-+"
-        fi
-
-        # Build data lines
-        if (( has_second_col )); then
-            line_names=$(printf "| %-${max_width1}s | %-${max_width2}s |" "${names[i]}" "${names[i+1]}")
-            line_times=$(printf "| %-${max_width1}s | %-${max_width2}s |" "${times[i]}" "${times[i+1]}")
-            line_weathers=$(printf "| %-${max_width1}s | %-${max_width2}s |" "${weathers[i]}" "${weathers[i+1]}")
-        else
-            line_names=$(printf "| %-${max_width1}s |" "${names[i]}")
-            line_times=$(printf "| %-${max_width1}s |" "${times[i]}")
-            line_weathers=$(printf "| %-${max_width1}s |" "${weathers[i]}")
-        fi
-
-        # Print the row
-        echo "$border"
-        echo "$line_names"
-        echo "$line_times"
-        echo "$line_weathers"
-        echo "$border"
-    done
-
-    # Increment the counter and sleep for a minute
-    ((weather_update_counter++))
-    sleep 60
-done
+main "$@" 

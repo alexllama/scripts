@@ -1,18 +1,22 @@
 [
     {
-        "name": "Hamlin, NY",
+        "displayname": "Hamlin",
+        "wttrname": "Hamlin+NY",
         "tz": "America/New_York"
     },
     {
-        "name": "Perth, Western Australia",
+        "displayname": "Perth",
+        "wttrname": "Perth+Australia",
         "tz": "Australia/Perth"
     },
     {
-        "name": "Seattle, WA",
+        "displayname": "Seattle",
+        "wttrname": "Seattle+WA",
         "tz": "America/Los_Angeles"
     },
     {
-        "name": "Honolulu, HI",
+        "displayname": "Honolulu",
+        "wttrname": "Honolulu+HI",
         "tz": "Pacific/Honolulu"
     }
 ]

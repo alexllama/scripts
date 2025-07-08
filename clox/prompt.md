@@ -16,23 +16,15 @@ Make a command line application that will display the time and weather at a numb
 
 
 
-A couple of fixes:
-- the weather is not showing at all
-- do not show the year
-- remove the labels City: and Time
-- display the information for each city in a box, from left to right
-
 
 to do
++ add timestamp for last weather update
 - if the cities file is not there it just hangs. error correct for this
 + json file should be relative to the script, not hardcoded to my home
-- weather update time should be in the json file
-- just display the city name, not the country
-- refresh weather every 3 hours, not every minute
-- change to format=3 to see the weather icon
-- consider getting the forecast to show the nice recap for the weather at the city
-- move everything to clox folder
-- check in clox folder
+- weather update time should be displayed
++ just display the city name, not the country
++ refresh weather every 3 hours, not every minute
++ change to format=3 to see the weather icon
 - update README to include all scripts in folder
-- make simlink to /usr/local/bin (i think)
++ make simlink to /usr/local/bin (i think)
 
