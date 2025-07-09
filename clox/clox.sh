@@ -45,12 +45,12 @@ main() {
             for i in "${!displaynames[@]}"; do
                 fetch_weather "${wttrnames[i]}" "${displaynames[i]}" > /dev/null
             done
-            last_weather_update=$(date +'%a, %b %d %I:%M %p')
+            last_weather_update=$(date +'%m/%d %I:%M%P')
             weather_update_counter=0
         fi
 
         clear
-        echo "-----------------------------"
+        echo "------------------------------"
         for i in "${!displaynames[@]}"; do
             color=${COLORS[$((i%${#COLORS[@]}))]}
             displayname="${displaynames[i]}"
@@ -60,9 +60,9 @@ main() {
             time=$(TZ="$tz" date +'%a, %b %d %I:%M %p')
             echo -e "${color}${weather}${NC}"
             echo -e "${color}${time}${NC}"
-            echo "-----------------------------"
+            echo "------------------------------"
         done
-        echo -e "Last weather update: $last_weather_update"
+        echo -e "Weather updated: $last_weather_update"
         ((weather_update_counter++))
         sleep $((TIME_UPDATE_INTERVAL * 60))
     done
