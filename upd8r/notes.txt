@@ -1,0 +1,32 @@
+do a timeshift call to set a restore point
+
+
+
+
+check for updates
+pamac checkupdates -a
+
+
+
+do the upgrade
+pamac upgrade -a
+
+
+list orphaned packages
+pamac list -o
+ask for confirmation, then delete if y
+pamac remove -o
+
+
+
+remove all packages except for the latest three package versions
+pamac clean --keep 3
+
+
+update flatpaks
+
+update snaps
+
+
+make list of all packages installed. put this list in this folder and check it in
+pamac list -i
