@@ -6,3 +6,5 @@ git-helper: goes through the commands for checking in latest changes. looks at s
 clox: shows time, date and current weather for a user defined list of cities
 
 start_conky.zsh: to start conky when the system starts
+
+wifi-connect.zsh: connect to wifi by providing SSID, username and password
