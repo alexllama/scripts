@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#
+# Script name: toggle-conky
+# Description: Toggle conky on/off
+# Originally from Distro Tube
+# GitLab: https://www.gitlab.com/dtos/etc/dtos-local-bin
+# License: https://www.gitlab.com/dtos/etc/dtos-local-bin
+# Contributors: Derek Taylor
+
+myConky="$HOME/.config/conky/conky.conf"
+pgrep -f conky &> /dev/null && killall conky || conky -c "$myConky"
