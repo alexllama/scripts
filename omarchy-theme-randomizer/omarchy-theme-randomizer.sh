@@ -6,10 +6,11 @@
 # Description: changes to a random theme from both default and extra themes
 # uses a separate text file for themes to ignore (since you can't delete
 # default themes easily). also selects a random wallpaper from the theme.
-#
-# Set on a systemd timer with these files in ~/.config/systemd/user/
-# omarchy-theme-randomizer.service
-# omarchy-theme-randomizer.timer
+# I have it set to SUPER+ALT+R for the keyboard shortcut, and in hypridle 
+# to change theme after the monitor wakes back up
+
+# add a sleep call to give enough time for the monitor is fully awake
+sleep 1
 
 # 1. Setup Paths
 # Automatically finds the directory where this script lives
