@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/bin/bash
 
 # --- Configuration ---
 # Set the network interface name (as specified in your request)
