@@ -47,6 +47,8 @@ if [ -n "$SELECTED_THEME" ]; then
         # Use the native Omarchy background setter
         echo "Setting background: $(basename "$SELECTED_BG")"
         omarchy-theme-bg-set "$SELECTED_BG"
+        notify-send -a "Omarchy" -u normal "Theme Randomized" "Now active: $SELECTED_THEME"
+        
     else
         echo "No specific backgrounds found for $SELECTED_THEME."
     fi
