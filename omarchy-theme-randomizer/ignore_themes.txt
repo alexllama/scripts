@@ -2,3 +2,4 @@ white
 catppuccin-latte
 flexoki-light
 rose-pine
+everforest
