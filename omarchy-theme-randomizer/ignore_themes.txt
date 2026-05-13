@@ -3,3 +3,4 @@ catppuccin-latte
 flexoki-light
 rose-pine
 everforest
+gruvbox
