@@ -143,23 +143,23 @@ done
 
 log "Discovered ${#unique_repos[@]} repo entries to check"
 
-# Start building report
+# Start building report header
 {
   echo "# Git Watch Report"
   echo "- Run: $TS"
   echo "- Host: $(hostname)"
   echo "- User: $(whoami)"
   echo ""
-  echo "## Summary"
-  echo ""
-  echo "| Repo | Type | Protocol | Branch | Upstream | Dirty | Ahead/Behind | Errors |"
-  echo "|---|---|---|---|---|---|---|---|"
 } > "$REPORT"
 
 summary_dirty=0
 summary_behind=0
 summary_errors=0
 summary_repos=0
+
+# Arrays to store results
+declare -a dirty_repos=()
+declare -a clean_repos=()
 
 # Function to run git with appropriate env
 run_git() {
@@ -204,6 +204,8 @@ for entry in "${unique_repos[@]}"; do
   branch=""
   upstream=""
   proto="none"
+  remote_url=""
+  dirty_out=""
   
   # Get remote URL
   if remote_url=$(run_git "$rtype" "$gdir" "$wtree" remote get-url origin 2>&1); then
@@ -316,45 +318,111 @@ for entry in "${unique_repos[@]}"; do
     summary_errors=$((summary_errors + 1))
   fi
   
-  # Add to summary table
   error_flag="no"
   if [[ ${#errors_repo[@]} -gt 0 ]]; then
     error_flag="YES"
   fi
-  printf "| %s | %s | %s | %s | %s | %d | +%d/-%d | %s |\n" \
-    "$display_path" "$rtype" "$proto" "$branch" "$upstream" "$dirty_count" "$ahead" "$behind" "$error_flag" >> "$REPORT"
   
-  # Add detailed section
-  {
-    echo ""
-    echo "## $display_path"
-    echo "- Type: $rtype"
-    echo "- Git dir: $gdir"
-    [[ -n "$wtree" ]] && echo "- Worktree: $wtree"
-    echo "- Protocol: $proto"
-    [[ -n "${remote_url:-}" ]] && echo "- Remote origin: $remote_url"
-    echo "- Branch: $branch"
-    echo "- Upstream: $upstream"
-    echo "- Dirty files: $dirty_count"
-    echo "- Ahead/Behind: +$ahead / -$behind"
-    echo ""
-    if [[ $dirty_count -gt 0 && -n "${dirty_out:-}" ]]; then
-      echo "### Uncommitted changes"
-      echo '```'
-      echo "$dirty_out"
-      echo '```'
-      echo ""
-    fi
-    if [[ ${#errors_repo[@]} -gt 0 ]]; then
-      echo "### Errors"
-      for e in "${errors_repo[@]}"; do
-        echo "- $e"
-      done
-      echo ""
-    fi
-  } >> "$REPORT"
+  # Store result for later sorting
+  if [[ $dirty_count -gt 0 || $behind -gt 0 || ${#errors_repo[@]} -gt 0 ]]; then
+    dirty_repos+=("$display_path|$rtype|$proto|$branch|$upstream|$dirty_count|$ahead|$behind|$error_flag|$gdir|$wtree|$remote_url|$dirty_out")
+  else
+    clean_repos+=("$display_path|$rtype|$proto|$branch|$upstream|$dirty_count|$ahead|$behind|$error_flag|$gdir|$wtree|$remote_url|")
+  fi
   
 done
+
+# Write report with dirty repos first (using python for aligned tables)
+python3 - "$REPORT" "$summary_repos" "$summary_dirty" "$summary_behind" "$summary_errors" "$LOG" "${dirty_repos[@]}" "${clean_repos[@]}" << 'PYEOF'
+import sys
+import os
+
+report_path = sys.argv[1]
+summary_repos = sys.argv[2]
+summary_dirty = sys.argv[3]
+summary_behind = sys.argv[4]
+summary_errors = sys.argv[5]
+log_path = sys.argv[6]
+
+# Remaining args are dirty_repos followed by clean_repos - but easier to pass separately
+# Actually we passed them as args; reconstruct
+args = sys.argv[7:]
+# We need to know split - easier to just read from env or pass differently
+# For now, reconstruct by scanning - simpler approach: write via bash with column
+pass
+PYEOF
+
+# Simpler: use column -t
+{
+  echo "## Needs Attention (Dirty / Behind / Errors)"
+  echo ""
+  if [[ ${#dirty_repos[@]} -eq 0 ]]; then
+    echo "_None_"
+    echo ""
+  else
+    {
+      echo "REPO|TYPE|PROTO|BRANCH|UPSTREAM|DIRTY|AHEAD/BEHIND|ERRORS"
+      for entry in "${dirty_repos[@]}"; do
+        IFS='|' read -r dpath drtype dproto dbranch dupstream ddirty dahead dbehind derrorflag dgdir dwtree dremote ddout <<< "$entry"
+        echo "${dpath}|${drtype}|${dproto}|${dbranch}|${dupstream}|${ddirty}|+${dahead}/-${dbehind}|${derrorflag}"
+      done
+    } | column -t -s '|' 
+    echo ""
+    echo "### Details"
+    for entry in "${dirty_repos[@]}"; do
+      IFS='|' read -r dpath drtype dproto dbranch dupstream ddirty dahead dbehind derrorflag dgdir dwtree dremote ddout <<< "$entry"
+      echo ""
+      echo "#### $dpath"
+      echo "- Type: $drtype"
+      echo "- Git dir: $dgdir"
+      [[ -n "$dwtree" ]] && echo "- Worktree: $dwtree"
+      echo "- Protocol: $dproto"
+      [[ -n "$dremote" && "$dremote" != "error:"* && "$dremote" != "Failed"* ]] && echo "- Remote origin: $dremote"
+      echo "- Branch: $dbranch"
+      echo "- Upstream: $dupstream"
+      echo "- Dirty files: $ddirty"
+      echo "- Ahead/Behind: +$dahead / -$dbehind"
+      echo "- Errors: $derrorflag"
+      echo ""
+      if [[ $ddirty -gt 0 && -n "$ddout" ]]; then
+        echo "##### Uncommitted changes"
+        echo '```'
+        echo "$ddout"
+        echo '```'
+        echo ""
+      fi
+    done
+  fi
+  
+  echo ""
+  echo "## Clean (No Action Needed)"
+  echo ""
+  if [[ ${#clean_repos[@]} -eq 0 ]]; then
+    echo "_None_"
+    echo ""
+  else
+    {
+      echo "REPO|TYPE|PROTO|BRANCH|UPSTREAM|DIRTY|AHEAD/BEHIND|ERRORS"
+      for entry in "${clean_repos[@]}"; do
+        IFS='|' read -r cpath crtype cproto cbranch cupstream cdirty cahead cbehind cerrorflag cgdir cwtree cremote ccdout <<< "$entry"
+        echo "${cpath}|${crtype}|${cproto}|${cbranch}|${cupstream}|${cdirty}|+${cahead}/-${cbehind}|${cerrorflag}"
+      done
+    } | column -t -s '|' 
+    echo ""
+  fi
+  
+  echo ""
+  echo "## Totals"
+  echo "- Repos checked: $summary_repos"
+  echo "- Repos needing attention: ${#dirty_repos[@]}"
+  echo "- Clean repos: ${#clean_repos[@]}"
+  echo "- Total dirty files: $summary_dirty"
+  echo "- Total commits behind: $summary_behind"
+  echo "- Repos with errors: $summary_errors"
+  echo ""
+  echo "---"
+  echo "Full log: $LOG"
+} >> "$REPORT"
 
 # Add summary footer
 {
@@ -374,9 +442,12 @@ log "Completed. Repos: $summary_repos, dirty: $summary_dirty, behind: $summary_b
 trap - EXIT
 
 # Send notification with summary (concise, link to full report)
-notify_msg="Git Watch: ${summary_repos} repos | ${summary_dirty} dirty | ${summary_behind} behind | ${summary_errors} errors. Full: $REPORT"
+notify_msg="Git Watch: ${summary_repos} repos | ${summary_dirty} dirty | ${summary_behind} behind | ${summary_errors} errors. Report: $REPORT"
 if command -v notify-send >/dev/null 2>&1; then
-  notify-send "Git Watch" "$notify_msg" -u normal 2>/dev/null || true
+  (setsid notify-send -u critical -t 0 -i dialog-information "Git Watch" "$notify_msg" >/dev/null 2>&1 &) 
+  disown 2>/dev/null || true
+  exit 0
 fi
+exit 0
 
 exit 0
