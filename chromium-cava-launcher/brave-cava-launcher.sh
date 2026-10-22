@@ -29,4 +29,4 @@ done
 # 7. Final cleanup and resize
 sleep 0.5
 hyprctl dispatch workspace 2
-hyprctl dispatch resizewindowpixel 0 200,class:brave-origin-beta
+hyprctl dispatch resizewindowpixel 0 250,class:brave-origin-beta
