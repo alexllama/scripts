@@ -1,0 +1,382 @@
+#!/usr/bin/env bash
+set -u
+
+HOME_DIR="$HOME"
+CONFIG="$HOME_DIR/.config/git-watch/config"
+STATE="$HOME_DIR/.local/state/git-watch"
+CACHE="$HOME_DIR/.cache/git-watch"
+REPORT="$STATE/last-report.md"
+LOG="$STATE/git-watch.log"
+TS=$(date -Iseconds)
+DATE_SHORT=$(date +%Y%m%d-%H%M%S)
+
+# Ensure dirs exist
+mkdir -p "$STATE" "$CACHE" "$HOME_DIR/.local/bin"
+
+# Source env if exists (for SSH_AUTH_SOCK)
+if [[ -f "$HOME_DIR/.config/git-watch/env" ]]; then
+  # shellcheck disable=SC1091
+  . "$HOME_DIR/.config/git-watch/env"
+fi
+
+# Trap to ensure we always write something
+cleanup() {
+  if [[ ! -f "$REPORT" ]]; then
+    cat > "$REPORT" << EOF
+# Git Watch Report (failed)
+- Run: $TS
+
+The git-watch script failed unexpectedly. Check $LOG for details.
+EOF
+  fi
+}
+trap cleanup EXIT
+
+# Overwrite log for this run only (keep last night's entry as requested - we overwrite each run)
+: > "$LOG"
+log() {
+  echo "[$(date -Iseconds)] $*" >> "$LOG"
+}
+
+log "Starting git-watch run"
+
+# Function to classify protocol
+get_proto() {
+  local url="$1"
+  if [[ -z "$url" ]]; then
+    echo "none"
+    return
+  fi
+  if [[ "$url" =~ ^git@ || "$url" =~ ^ssh:// ]]; then
+    echo "ssh"
+    return
+  fi
+  if [[ "$url" =~ ^https:// ]]; then
+    echo "https"
+    return
+  fi
+  echo "other"
+}
+
+# Collect repos
+mapfile -t discovered < <(
+  {
+    # Find normal repos via fd (constrained to $HOME)
+    if command -v fd >/dev/null 2>&1; then
+      fd -H -t d -t f '^\.git$' "$HOME_DIR" \
+        --exclude node_modules \
+        --exclude .cache \
+        --exclude .local/share/containers \
+        --exclude .cargo/registry \
+        --exclude .npm \
+        --exclude snap \
+        --exclude .var/app \
+        2>/dev/null | while read -r gitpath; do
+          [[ -z "$gitpath" ]] && continue
+          if [[ -f "$gitpath" ]]; then
+            dirname "$gitpath"
+          else
+            dirname "$gitpath"
+          fi
+        done
+    else
+      # Fallback to find if fd missing (shouldn't happen per requirements)
+      find "$HOME_DIR" \
+        \( -path "*/node_modules/*" -o -path "*/.cache/*" -o -path "*/.local/share/containers/*" -o -path "*/.cargo/*" -o -path "*/.npm/*" -o -path "*/snap/*" -o -path "*/.var/app/*" \) -prune -o \
+        -name ".git" \( -type f -print -o -type d -print \) 2>/dev/null | while read -r gitpath; do
+          [[ -z "$gitpath" ]] && continue
+          if [[ -f "$gitpath" ]]; then
+            dirname "$gitpath"
+          else
+            dirname "$gitpath"
+          fi
+        done
+    fi
+
+    # Add explicit bare entries from config
+    if [[ -f "$CONFIG" ]]; then
+      grep -v '^[[:space:]]*#' "$CONFIG" | grep -v '^[[:space:]]*$' | while IFS=: read -r type gdir wtree; do
+        [[ "$type" == "bare" ]] || continue
+        [[ -n "$gdir" ]] || continue
+        # Expand $HOME if present
+        gdir_exp="${gdir//\$HOME/$HOME_DIR}"
+        wtree_exp="${wtree//\$HOME/$HOME_DIR}"
+        if [[ -n "$wtree_exp" ]]; then
+          echo "BARE|$gdir_exp|$wtree_exp"
+        else
+          echo "BARE|$gdir_exp|"
+        fi
+      done
+    fi
+  } | sort -u
+)
+
+# Build list of repos to check
+repos_list=()
+for entry in "${discovered[@]}"; do
+  [[ -z "$entry" ]] && continue
+  if [[ "$entry" == BARE\|* ]]; then
+    IFS='|' read -r _type gdir wtree <<< "$entry"
+    repos_list+=("BARE|$gdir|$wtree")
+    continue
+  fi
+  # normal repo candidate
+  repo_root="$entry"
+  # Verify it's a git repo
+  if git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1; then
+    repos_list+=("NORMAL|$repo_root|")
+  else
+    log "Discovery verification failed for: $repo_root"
+  fi
+done
+
+# Deduplicate while preserving order of first appearance
+declare -A seen
+unique_repos=()
+for entry in "${repos_list[@]}"; do
+  key="$entry"
+  if [[ -z "${seen[$key]:-}" ]]; then
+    seen[$key]=1
+    unique_repos+=("$entry")
+  fi
+done
+
+log "Discovered ${#unique_repos[@]} repo entries to check"
+
+# Start building report
+{
+  echo "# Git Watch Report"
+  echo "- Run: $TS"
+  echo "- Host: $(hostname)"
+  echo "- User: $(whoami)"
+  echo ""
+  echo "## Summary"
+  echo ""
+  echo "| Repo | Type | Protocol | Branch | Upstream | Dirty | Ahead/Behind | Errors |"
+  echo "|---|---|---|---|---|---|---|---|"
+} > "$REPORT"
+
+summary_dirty=0
+summary_behind=0
+summary_errors=0
+summary_repos=0
+
+# Function to run git with appropriate env
+run_git() {
+  local type="$1"
+  shift
+  local gdir="$1"
+  shift
+  local wtree="$1"
+  shift
+  if [[ "$type" == "BARE" ]]; then
+    if [[ -n "$wtree" ]]; then
+      env GIT_DIR="$gdir" GIT_WORK_TREE="$wtree" git "$@"
+    else
+      env GIT_DIR="$gdir" git "$@"
+    fi
+  else
+    local repo_root="$gdir"
+    git -C "$repo_root" "$@"
+  fi
+}
+
+# Process each repo
+for entry in "${unique_repos[@]}"; do
+  IFS='|' read -r rtype gdir wtree <<< "$entry"
+  summary_repos=$((summary_repos + 1))
+  
+  if [[ "$rtype" == "BARE" ]]; then
+    display_path="$wtree"
+    if [[ -z "$display_path" ]]; then
+      display_path="$gdir"
+    fi
+  else
+    display_path="$gdir"
+  fi
+  
+  log "Checking: $display_path ($rtype)"
+  
+  errors_repo=()
+  dirty_count=0
+  ahead=0
+  behind=0
+  branch=""
+  upstream=""
+  proto="none"
+  
+  # Get remote URL
+  if remote_url=$(run_git "$rtype" "$gdir" "$wtree" remote get-url origin 2>&1); then
+    proto=$(get_proto "$remote_url")
+  else
+    errors_repo+=("Failed to get origin remote: $remote_url")
+    proto="none"
+  fi
+  
+  # Get branch
+  if branch=$(run_git "$rtype" "$gdir" "$wtree" rev-parse --abbrev-ref HEAD 2>&1); then
+    : 
+  else
+    errors_repo+=("Failed to get branch: $branch")
+    branch="unknown"
+  fi
+  
+  # Check dirty status
+  if dirty_out=$(run_git "$rtype" "$gdir" "$wtree" status --porcelain 2>&1); then
+    if [[ -n "$dirty_out" ]]; then
+      dirty_count=$(echo "$dirty_out" | grep -c '^' || true)
+    else
+      dirty_count=0
+    fi
+  else
+    errors_repo+=("Failed to get status: $dirty_out")
+    dirty_count=0
+  fi
+  
+  # Fetch
+  fetch_out=""
+  fetch_rc=0
+  if [[ "$rtype" == "BARE" ]]; then
+    if [[ -n "$wtree" ]]; then
+      fetch_out=$(timeout 300 bash -c 'GIT_DIR="$1" GIT_WORK_TREE="$2" git fetch --quiet --all' _ "$gdir" "$wtree" 2>&1)
+      fetch_rc=$?
+    else
+      fetch_out=$(timeout 300 bash -c 'GIT_DIR="$1" git fetch --quiet --all' _ "$gdir" 2>&1)
+      fetch_rc=$?
+    fi
+  else
+    fetch_out=$(timeout 300 git -C "$gdir" fetch --quiet --all 2>&1)
+    fetch_rc=$?
+  fi
+  if [[ $fetch_rc -eq 0 ]]; then
+    : 
+  else
+    if [[ $fetch_rc -eq 124 ]]; then
+      errors_repo+=("Fetch timed out after 300s")
+      log "TIMEOUT fetching $display_path"
+    else
+      errors_repo+=("Fetch failed (rc=$fetch_rc): $fetch_out")
+      log "FETCH ERROR for $display_path: $fetch_out"
+      # Check for common SSH issues
+      if echo "$fetch_out" | grep -qi "Permission denied\|publickey\|Host key verification"; then
+        errors_repo+=("SSH/auth error suspected - check SSH_AUTH_SOCK/agent/passphrase")
+      fi
+    fi
+  fi
+  
+  # Check upstream
+  if [[ $fetch_rc -eq 0 || -n "$(run_git "$rtype" "$gdir" "$wtree" rev-parse --abbrev-ref '@{u}' 2>/dev/null)" ]]; then
+    if upstream=$(run_git "$rtype" "$gdir" "$wtree" rev-parse --abbrev-ref '@{u}' 2>&1); then
+      if [[ "$upstream" != "@{u}" && -n "$upstream" ]]; then
+        # Calculate ahead/behind
+        if behind=$(run_git "$rtype" "$gdir" "$wtree" rev-list --count HEAD.."$upstream" 2>&1); then
+          if [[ "$behind" =~ ^[0-9]+$ ]]; then
+            : 
+          else
+            behind=0
+            errors_repo+=("Failed to calculate behind count")
+          fi
+        else
+          behind=0
+          errors_repo+=("Failed to calculate behind: $behind")
+        fi
+        
+        if ahead=$(run_git "$rtype" "$gdir" "$wtree" rev-list --count "$upstream"..HEAD 2>&1); then
+          if [[ "$ahead" =~ ^[0-9]+$ ]]; then
+            : 
+          else
+            ahead=0
+            errors_repo+=("Failed to calculate ahead count")
+          fi
+        else
+          ahead=0
+          errors_repo+=("Failed to calculate ahead: $ahead")
+        fi
+      else
+        upstream="none"
+        ahead=0
+        behind=0
+      fi
+    else
+      upstream="none"
+      errors_repo+=("No upstream configured or failed to get upstream: $upstream")
+    fi
+  else
+    upstream="unknown (fetch failed)"
+  fi
+  
+  # Update summaries
+  if [[ $dirty_count -gt 0 ]]; then
+    summary_dirty=$((summary_dirty + dirty_count))
+  fi
+  if [[ $behind -gt 0 ]]; then
+    summary_behind=$((summary_behind + behind))
+  fi
+  if [[ ${#errors_repo[@]} -gt 0 ]]; then
+    summary_errors=$((summary_errors + 1))
+  fi
+  
+  # Add to summary table
+  error_flag="no"
+  if [[ ${#errors_repo[@]} -gt 0 ]]; then
+    error_flag="YES"
+  fi
+  printf "| %s | %s | %s | %s | %s | %d | +%d/-%d | %s |\n" \
+    "$display_path" "$rtype" "$proto" "$branch" "$upstream" "$dirty_count" "$ahead" "$behind" "$error_flag" >> "$REPORT"
+  
+  # Add detailed section
+  {
+    echo ""
+    echo "## $display_path"
+    echo "- Type: $rtype"
+    echo "- Git dir: $gdir"
+    [[ -n "$wtree" ]] && echo "- Worktree: $wtree"
+    echo "- Protocol: $proto"
+    [[ -n "${remote_url:-}" ]] && echo "- Remote origin: $remote_url"
+    echo "- Branch: $branch"
+    echo "- Upstream: $upstream"
+    echo "- Dirty files: $dirty_count"
+    echo "- Ahead/Behind: +$ahead / -$behind"
+    echo ""
+    if [[ $dirty_count -gt 0 && -n "${dirty_out:-}" ]]; then
+      echo "### Uncommitted changes"
+      echo '```'
+      echo "$dirty_out"
+      echo '```'
+      echo ""
+    fi
+    if [[ ${#errors_repo[@]} -gt 0 ]]; then
+      echo "### Errors"
+      for e in "${errors_repo[@]}"; do
+        echo "- $e"
+      done
+      echo ""
+    fi
+  } >> "$REPORT"
+  
+done
+
+# Add summary footer
+{
+  echo ""
+  echo "## Totals"
+  echo "- Repos checked: $summary_repos"
+  echo "- Total dirty files: $summary_dirty"
+  echo "- Total commits behind: $summary_behind"
+  echo "- Repos with errors: $summary_errors"
+  echo ""
+  echo "---"
+  echo "Full log: $LOG"
+} >> "$REPORT"
+
+log "Completed. Repos: $summary_repos, dirty: $summary_dirty, behind: $summary_behind, errors: $summary_errors"
+
+trap - EXIT
+
+# Send notification with summary (concise, link to full report)
+notify_msg="Git Watch: ${summary_repos} repos | ${summary_dirty} dirty | ${summary_behind} behind | ${summary_errors} errors. Full: $REPORT"
+if command -v notify-send >/dev/null 2>&1; then
+  notify-send "Git Watch" "$notify_msg" -u normal 2>/dev/null || true
+fi
+
+exit 0
