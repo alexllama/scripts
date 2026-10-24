@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+set -u
+
+GIT_WATCH="/home/alex/dev/scripts/git-watch/git-watch"
+CACHE_JSON="/tmp/git-updater-cache.json"
+
+usage() {
+  cat << 'USAGE'
+git-updater - Update git repos without cd'ing into them
+
+Usage:
+  git-updater list                List all repos with status (uses git-watch --json)
+  git-updater status              Same as list
+  git-updater update <path>       Update a specific repo by path (ff-only by default)
+  git-updater update-all          Update all repos that are behind and clean (ff-only)
+  git-updater refresh             Force refresh cache
+
+Notes:
+- Skips repos with uncommitted changes (dirty)
+- Uses git -C for normal repos, GIT_DIR/GIT_WORK_TREE for bare repos
+- Defaults to --ff-only for safety
+- Handles detached HEAD by skipping with explanation
+USAGE
+}
+
+refresh_cache() {
+  "$GIT_WATCH" --json > "$CACHE_JSON" 2>/dev/null || {
+    echo "Failed to get repo data from git-watch"
+    exit 1
+  }
+}
+
+ensure_cache() {
+  if [[ ! -f "$CACHE_JSON" ]]; then
+    refresh_cache
+  fi
+}
+
+cmd="${1:-list}"
+shift || true
+
+case "$cmd" in
+  list|status)
+    ensure_cache
+    python3 - "$CACHE_JSON" << 'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+
+repos = data.get('repos', [])
+summary = data.get('summary', {})
+
+print(f"Git Updater - {data.get('timestamp','')}")
+print(f"Repos: {summary.get('repos_checked',0)} | Dirty: {summary.get('dirty_files',0)} | Behind: {summary.get('behind_commits',0)} | Errors: {summary.get('repos_with_errors',0)}")
+print()
+
+for r in repos:
+    path = r['path']
+    rtype = r['type']
+    proto = r['protocol']
+    branch = r['branch']
+    upstream = r['upstream']
+    dirty = r['dirty']
+    ahead = r['ahead']
+    behind = r['behind']
+    errors = r['errors']
+    
+    status = []
+    if dirty > 0:
+        status.append(f"DIRTY({dirty})")
+    if behind > 0:
+        status.append(f"BEHIND({behind})")
+    if ahead > 0:
+        status.append(f"AHEAD({ahead})")
+    if errors:
+        status.append("ERRORS")
+    if not status:
+        status.append("OK")
+    
+    print(f"[{rtype:5}] [{proto:5}] {path}")
+    print(f"         {branch} -> {upstream} | +{ahead}/-{behind} | {' '.join(status)}")
+    if dirty > 0 and r.get('dirty_files'):
+        for f in r['dirty_files'][:5]:
+            print(f"           {f}")
+        if len(r['dirty_files']) > 5:
+            print(f"           ... +{len(r['dirty_files'])-5} more")
+    if errors and r.get('error_messages'):
+        for e in r['error_messages'][:2]:
+            e_clean = e.replace('\n',' ').strip()
+            if e_clean:
+                print(f"           ERR: {e_clean[:80]}")
+    print()
+PYEOF
+    ;;
+  refresh)
+    refresh_cache
+    echo "Cache refreshed"
+    ;;
+  update)
+    if [[ $# -lt 1 ]]; then
+      echo "Usage: git-updater update <repo-path>"
+      exit 1
+    fi
+    target="$1"
+    ensure_cache
+    python3 - "$CACHE_JSON" "$target" << 'PYEOF'
+import json
+import sys
+import subprocess
+import os
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+
+target = sys.argv[2]
+repo = None
+for r in data.get('repos', []):
+    if r['path'] == target or r['gitdir'] == target:
+        repo = r
+        break
+
+if not repo:
+    print(f"Repo not found: {target}")
+    sys.exit(1)
+
+path = repo['path']
+rtype = repo['type']
+gitdir = repo['gitdir']
+worktree = repo['worktree']
+dirty = repo['dirty']
+ahead = repo['ahead']
+behind = repo['behind']
+branch = repo['branch']
+upstream = repo['upstream']
+errors = repo['errors']
+
+if dirty > 0:
+    print(f"[SKIP] {path} - has uncommitted changes ({dirty} files)")
+    sys.exit(0)
+
+if branch == 'HEAD':
+    print(f"[SKIP] {path} - detached HEAD, cannot pull safely")
+    sys.exit(0)
+
+if upstream == 'none' or upstream == 'unknown':
+    print(f"[SKIP] {path} - no upstream configured")
+    sys.exit(0)
+
+if behind == 0 and ahead == 0:
+    print(f"[OK]   {path} - already up to date")
+    sys.exit(0)
+
+if errors:
+    print(f"[WARN] {path} - has previous errors, attempting pull anyway...")
+
+print(f"[PULL] {path} ({branch} <- {upstream}, behind: {behind})")
+try:
+    if rtype == 'BARE' and worktree and worktree.strip():
+        env = os.environ.copy()
+        env['GIT_DIR'] = gitdir
+        env['GIT_WORK_TREE'] = worktree
+        result = subprocess.run(['git', 'pull', '--ff-only'], env=env, cwd=worktree, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+    else:
+        result = subprocess.run(['git', '-C', path, 'pull', '--ff-only'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+    
+    out = result.stdout.decode('utf-8', errors='replace')
+    err = result.stderr.decode('utf-8', errors='replace')
+    if result.returncode == 0:
+        print(f"[OK]   {path} - pulled successfully")
+        if out.strip():
+            print(f"       {out.strip()}")
+    else:
+        print(f"[FAIL] {path} - pull failed (rc={result.returncode})")
+        if err.strip():
+            for line in err.strip().splitlines()[:5]:
+                print(f"       {line}")
+except subprocess.TimeoutExpired:
+    print(f"[FAIL] {path} - pull timed out")
+except Exception as e:
+    print(f"[FAIL] {path} - {e}")
+PYEOF
+    ;;
+  update-all)
+    ensure_cache
+    python3 - "$CACHE_JSON" << 'PYEOF'
+import json
+import sys
+import subprocess
+import os
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+
+repos = data.get('repos', [])
+updated = 0
+skipped = 0
+failed = 0
+
+for r in repos:
+    path = r['path']
+    rtype = r['type']
+    gitdir = r['gitdir']
+    worktree = r['worktree']
+    dirty = r['dirty']
+    behind = r['behind']
+    branch = r['branch']
+    upstream = r['upstream']
+    errors = r['errors']
+    
+    if dirty > 0:
+        print(f"[SKIP] {path} (dirty)")
+        skipped += 1
+        continue
+    if branch == 'HEAD':
+        print(f"[SKIP] {path} (detached HEAD)")
+        skipped += 1
+        continue
+    if upstream == 'none' or upstream == 'unknown':
+        print(f"[SKIP] {path} (no upstream)")
+        skipped += 1
+        continue
+    if behind == 0:
+        skipped += 1
+        continue
+    
+    print(f"[PULL] {path} (+{r['ahead']}/-{behind})", end=" ... ")
+    try:
+        if rtype == 'BARE' and worktree and worktree.strip():
+            env = os.environ.copy()
+            env['GIT_DIR'] = gitdir
+            env['GIT_WORK_TREE'] = worktree
+            result = subprocess.run(['git', 'pull', '--ff-only'], env=env, cwd=worktree, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+        else:
+            result = subprocess.run(['git', '-C', path, 'pull', '--ff-only'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+        if result.returncode == 0:
+            print("OK")
+            updated += 1
+        else:
+            print("FAILED")
+            failed += 1
+    except Exception as e:
+        print(f"FAILED ({e})")
+        failed += 1
+
+print()
+print(f"Updated: {updated} | Skipped: {skipped} | Failed: {failed}")
+PYEOF
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

@@ -2,6 +2,8 @@
 
 Monitors all git repositories under `$HOME` nightly (and on demand). Discovers repos automatically with `fd`, explicitly tracks your bare dotfiles repo at `$HOME/.cfg` with worktree `$HOME`, reports dirty files and sync state with upstream, and alerts you via notification with a full report.
 
+The folder also contains `git-updater`, the backend for updating repos in place (no `cd` required), intended to power an Omarchy plugin UI.
+
 ## What it does
 
 For each repo found under `$HOME`:
@@ -112,9 +114,66 @@ fi
 
 **Network issues:** The script uses 300s timeout and will report timeouts as errors.
 
+## JSON output (for UIs)
+
+`git-watch --json` emits the same discovery/status data as structured JSON on stdout, without writing the report or sending a notification. This is the machine-readable backend for `git-updater` and any future plugin UI.
+
+```json
+{
+  "timestamp": "2026-10-23T08:10:53-04:00",
+  "summary": {
+    "repos_checked": 116,
+    "dirty_files": 19,
+    "behind_commits": 618,
+    "repos_with_errors": 45
+  },
+  "repos": [
+    {
+      "path": "/home/alex/.config/omarchy/themes/aura",
+      "type": "NORMAL",
+      "gitdir": "/home/alex/.config/omarchy/themes/aura",
+      "worktree": "",
+      "protocol": "https",
+      "branch": "main",
+      "upstream": "origin/main",
+      "dirty": 0,
+      "ahead": 0,
+      "behind": 1,
+      "errors": false,
+      "error_messages": [],
+      "remote": "https://github.com/bjarneo/omarchy-aura-theme",
+      "dirty_files": []
+    }
+  ]
+}
+```
+
+Fields: `type` is `NORMAL` or `BARE`; `dirty` is a file count; `ahead`/`behind` are commit counts relative to `upstream`; `dirty_files` is the raw `git status --porcelain` lines.
+
+## git-updater
+
+Updates repos without navigating to them. It reuses `git-watch --json` for discovery/status and uses `git -C` for normal repos and `GIT_DIR`/`GIT_WORK_TREE` for bare repos.
+
+```bash
+git-updater list                 # status of every repo
+git-updater refresh              # re-run discovery/fetch, refresh cache
+git-updater update <path>        # update one repo (ff-only)
+git-updater update-all           # update every clean, behind repo (ff-only)
+```
+
+Safety behavior:
+- Repos with uncommitted changes are **skipped** (never auto-stashed or overwritten).
+- Detached `HEAD` repos are **skipped** (e.g. some LazyVim plugins).
+- Repos with no upstream are **skipped**.
+- `--ff-only` is always used: if a repo has diverged, the pull fails instead of creating a merge commit. Resolve diverged repos manually.
+- Timeouts (300s) prevent a slow remote from hanging the whole run.
+
+The status is cached in `/tmp/git-updater-cache.json`; run `git-updater refresh` after updates to get fresh numbers.
+
 ## Files
 
 - Script: `/home/alex/dev/scripts/git-watch/git-watch` (also symlinked to `~/.local/bin/git-watch`)
+- Updater: `/home/alex/dev/scripts/git-watch/git-updater` (also symlinked to `~/.local/bin/git-updater`)
 - Config: `~/.config/git-watch/config` - lists bare repos (format: `bare:<gitdir>:<worktree>`)
 - Env (optional): `~/.config/git-watch/env` - for `SSH_AUTH_SOCK` etc.
 - Report: `~/.local/state/git-watch/last-report.md` (overwritten each run, no history)
@@ -153,3 +212,13 @@ Runs nightly at ~03:00 with 15m jitter. Timer is persistent.
 - All errors are reported explicitly
 - Report is rebuilt fresh each run (no log bloat/history)
 - Works on older systems, minimal dependencies
+---
+
+## Rofi UI (stage 3)
+
+```bash
+git-update-rofi
+```
+
+Menu: [UPDATE] pull clean behind repos, [UPDATE-ALL] pull all clean behind, [REFRESH], [REPORT] open full report, [OK]/[DIRTY]/[ERROR] for status. Uses git-updater under the hood.
+Bind to a keybind in Hyprland/Omarchy for quick access.

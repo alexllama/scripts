@@ -10,6 +10,12 @@ LOG="$STATE/git-watch.log"
 TS=$(date -Iseconds)
 DATE_SHORT=$(date +%Y%m%d-%H%M%S)
 
+# Check for JSON mode
+JSON_MODE=0
+if [[ "${1:-}" == "--json" || "${1:-}" == "json" ]]; then
+  JSON_MODE=1
+fi
+
 # Ensure dirs exist
 mkdir -p "$STATE" "$CACHE" "$HOME_DIR/.local/bin"
 
@@ -160,6 +166,7 @@ summary_repos=0
 # Arrays to store results
 declare -a dirty_repos=()
 declare -a clean_repos=()
+declare -a all_repo_data=()
 
 # Function to run git with appropriate env
 run_git() {
@@ -324,6 +331,10 @@ for entry in "${unique_repos[@]}"; do
   fi
   
   # Store result for later sorting
+  errors_str=$(printf '%s;' "${errors_repo[@]}")
+  dirty_b64=$(printf '%s' "$dirty_out" | base64 -w0 2>/dev/null || printf '%s' "$dirty_out" | base64 | tr -d '\n')
+  all_repo_data+=("$display_path|$rtype|$gdir|$wtree|$proto|$branch|$upstream|$dirty_count|$ahead|$behind|$error_flag|$remote_url|$errors_str|$dirty_b64")
+  
   if [[ $dirty_count -gt 0 || $behind -gt 0 || ${#errors_repo[@]} -gt 0 ]]; then
     dirty_repos+=("$display_path|$rtype|$proto|$branch|$upstream|$dirty_count|$ahead|$behind|$error_flag|$gdir|$wtree|$remote_url|$dirty_out")
   else
@@ -332,27 +343,78 @@ for entry in "${unique_repos[@]}"; do
   
 done
 
-# Write report with dirty repos first (using python for aligned tables)
-python3 - "$REPORT" "$summary_repos" "$summary_dirty" "$summary_behind" "$summary_errors" "$LOG" "${dirty_repos[@]}" "${clean_repos[@]}" << 'PYEOF'
+if [[ $JSON_MODE -eq 1 ]]; then
+  python3 - "$summary_repos" "$summary_dirty" "$summary_behind" "$summary_errors" "$TS" "$LOG" "${all_repo_data[@]}" << 'PYEOF'
 import sys
-import os
+import json
+import base64
 
-report_path = sys.argv[1]
-summary_repos = sys.argv[2]
-summary_dirty = sys.argv[3]
-summary_behind = sys.argv[4]
-summary_errors = sys.argv[5]
-log_path = sys.argv[6]
+args = sys.argv[1:]
+summary_repos = int(args[0])
+summary_dirty = int(args[1])
+summary_behind = int(args[2])
+summary_errors = int(args[3])
+ts = args[4]
+log_path = args[5]
+repo_args = args[6:]
 
-# Remaining args are dirty_repos followed by clean_repos - but easier to pass separately
-# Actually we passed them as args; reconstruct
-args = sys.argv[7:]
-# We need to know split - easier to just read from env or pass differently
-# For now, reconstruct by scanning - simpler approach: write via bash with column
-pass
+repos = []
+for entry in repo_args:
+    parts = entry.split('|')
+    if len(parts) < 14:
+        continue
+    display_path = parts[0]
+    rtype = parts[1]
+    gdir = parts[2]
+    wtree = parts[3]
+    proto = parts[4]
+    branch = parts[5]
+    upstream = parts[6]
+    dirty_count = int(parts[7])
+    ahead = int(parts[8])
+    behind = int(parts[9])
+    error_flag = parts[10]
+    remote_url = parts[11]
+    errors_str = parts[12].rstrip(';')
+    dirty_b64 = parts[13]
+    try:
+        dirty_out = base64.b64decode(dirty_b64).decode('utf-8', errors='replace')
+    except Exception:
+        dirty_out = ''
+    errors = [e for e in errors_str.split(';') if e]
+    repos.append({
+        'path': display_path,
+        'type': rtype,
+        'gitdir': gdir,
+        'worktree': wtree,
+        'protocol': proto,
+        'branch': branch,
+        'upstream': upstream,
+        'dirty': dirty_count,
+        'ahead': ahead,
+        'behind': behind,
+        'errors': error_flag == 'YES',
+        'error_messages': errors,
+        'remote': remote_url,
+        'dirty_files': dirty_out.splitlines() if dirty_out else []
+    })
+
+result = {
+    'timestamp': ts,
+    'summary': {
+        'repos_checked': summary_repos,
+        'dirty_files': summary_dirty,
+        'behind_commits': summary_behind,
+        'repos_with_errors': summary_errors
+    },
+    'repos': repos
+}
+print(json.dumps(result, indent=2))
 PYEOF
+  exit 0
+fi
 
-# Simpler: use column -t
+# Write report with dirty repos first (using column for aligned tables)
 {
   echo "## Needs Attention (Dirty / Behind / Errors)"
   echo ""

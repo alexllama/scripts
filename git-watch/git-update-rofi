@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+GIT_UPDATER="/home/alex/dev/scripts/git-watch/git-updater"
+STATE_DIR="$HOME/.local/state/git-watch"
+LOG_FILE="$STATE_DIR/git-updater-rofi.log"
+mkdir -p "$STATE_DIR"
+
+# Refresh to get latest
+"$GIT_UPDATER" refresh >/dev/null 2>&1
+
+# Build menu
+MENU=""
+while IFS='|' read -r path rtype proto branch upstream dirty behind ahead errors status_line; do
+  [[ -z "$path" ]] && continue
+  [[ "$path" == "Git Updater"* ]] && continue
+  [[ "$path" =~ ^Repos: ]] && continue
+  [[ "$path" =~ ^\[ ]] || continue
+  
+  # Extract path (remove brackets and type/proto)
+  repo_path=$(echo "$path" | sed -n 's/.*\] \(.*\)$/\1/p')
+  [[ -z "$repo_path" ]] && continue
+  
+  # Get status
+  status=$(grep -A1 "^\[.*\] \[.*\] $repo_path$" < <("$GIT_UPDATER" list 2>/dev/null) | tail -1 | sed 's/^[[:space:]]*//')
+  
+  # Check if can update
+  if echo "$status" | grep -q "BEHIND"; then
+    if echo "$status" | grep -q "DIRTY"; then
+      MENU+="[SKIP-DIRTY] $repo_path ($status)\\n"
+    elif echo "$status" | grep -q "ERRORS"; then
+      MENU+="[TRY-UPDATE] $repo_path ($status)\\n"
+    elif echo "$status" | grep -q "HEAD"; then
+      MENU+="[SKIP-HEAD] $repo_path ($status)\\n"
+    else
+      MENU+="[UPDATE] $repo_path ($status)\\n"
+    fi
+  elif echo "$status" | grep -q "DIRTY"; then
+    MENU+="[DIRTY] $repo_path ($status)\\n"
+  elif echo "$status" | grep -q "ERRORS"; then
+    MENU+="[ERROR] $repo_path ($status)\\n"
+  elif echo "$status" | grep -q "OK"; then
+    MENU+="[OK] $repo_path ($status)\\n"
+  else
+    MENU+="[INFO] $repo_path ($status)\\n"
+  fi
+done < <("$GIT_UPDATER" list 2>&1)
+
+MENU+="\\n[UPDATE-ALL] Update all clean repos behind\\n[REFRESH] Refresh status\\n[REPORT] Open git-watch report\\n[EXIT] Exit"
+
+# Show menu
+CHOICE=$(echo -e "$MENU" | rofi -dmenu -i -p "Git Update" -theme-str 'window {width: 900px;}' 2>/dev/null)
+
+[[ -z "$CHOICE" ]] && exit 0
+
+if [[ "$CHOICE" == "[EXIT]" ]]; then
+  exit 0
+elif [[ "$CHOICE" == "[REPORT]" ]]; then
+  if command -v micro >/dev/null 2>&1 && command -v foot >/dev/null 2>&1; then
+    foot -e micro "$HOME/.local/state/git-watch/last-report.md" >/dev/null 2>&1 &
+  elif command -v micro >/dev/null 2>&1; then
+    micro "$HOME/.local/state/git-watch/last-report.md" >/dev/null 2>&1 &
+  else
+    xdg-open "$HOME/.local/state/git-watch/last-report.md" >/dev/null 2>&1 &
+  fi
+  exit 0
+elif [[ "$CHOICE" == "[REFRESH]" ]]; then
+  "$GIT_UPDATER" refresh
+  notify-send "Git Updater" "Refreshed" 2>/dev/null
+  exec "$0"
+elif [[ "$CHOICE" == "[UPDATE-ALL]" ]]; then
+  RESULT=$("$GIT_UPDATER" update-all 2>&1)
+  echo "$RESULT" >> "$LOG_FILE"
+  notify-send "Git Updater" "$(echo "$RESULT" | tail -2 | tr '\n' ' ')" 2>/dev/null
+  exit 0
+elif [[ "$CHOICE" == \[UPDATE\]* ]]; then
+  REPO=$(echo "$CHOICE" | sed -n 's/^\[UPDATE\] \(.*\) (.*)$/\1/p')
+  RESULT=$("$GIT_UPDATER" update "$REPO" 2>&1)
+  echo "$RESULT" >> "$LOG_FILE"
+  notify-send "Git Updater" "$(echo "$RESULT" | tail -1)" 2>/dev/null
+  exit 0
+elif [[ "$CHOICE" == \[TRY-UPDATE\]* ]]; then
+  REPO=$(echo "$CHOICE" | sed -n 's/^\[TRY-UPDATE\] \(.*\) (.*)$/\1/p')
+  RESULT=$("$GIT_UPDATER" update "$REPO" 2>&1)
+  echo "$RESULT" >> "$LOG_FILE"
+  notify-send "Git Updater" "$(echo "$RESULT" | tail -1)" 2>/dev/null
+  exit 0
+else
+  # Just info
+  exit 0
+fi
