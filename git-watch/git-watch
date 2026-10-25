@@ -10,11 +10,15 @@ LOG="$STATE/git-watch.log"
 TS=$(date -Iseconds)
 DATE_SHORT=$(date +%Y%m%d-%H%M%S)
 
-# Check for JSON mode
+# Parse flags
 JSON_MODE=0
-if [[ "${1:-}" == "--json" || "${1:-}" == "json" ]]; then
-  JSON_MODE=1
-fi
+PRINT_REPORT=0
+for arg in "$@"; do
+  case "$arg" in
+    --json|json) JSON_MODE=1 ;;
+    --print|print) PRINT_REPORT=1 ;;
+  esac
+done
 
 # Ensure dirs exist
 mkdir -p "$STATE" "$CACHE" "$HOME_DIR/.local/bin"
@@ -486,30 +490,12 @@ fi
   echo "Full log: $LOG"
 } >> "$REPORT"
 
-# Add summary footer
-{
-  echo ""
-  echo "## Totals"
-  echo "- Repos checked: $summary_repos"
-  echo "- Total dirty files: $summary_dirty"
-  echo "- Total commits behind: $summary_behind"
-  echo "- Repos with errors: $summary_errors"
-  echo ""
-  echo "---"
-  echo "Full log: $LOG"
-} >> "$REPORT"
-
 log "Completed. Repos: $summary_repos, dirty: $summary_dirty, behind: $summary_behind, errors: $summary_errors"
 
 trap - EXIT
 
-# Send notification with summary (concise, link to full report)
-notify_msg="Git Watch: ${summary_repos} repos | ${summary_dirty} dirty | ${summary_behind} behind | ${summary_errors} errors. Report: $REPORT"
-if command -v notify-send >/dev/null 2>&1; then
-  (setsid notify-send -u critical -t 0 -i dialog-information "Git Watch" "$notify_msg" >/dev/null 2>&1 &) 
-  disown 2>/dev/null || true
-  exit 0
+if [[ $PRINT_REPORT -eq 1 ]]; then
+  cat "$REPORT"
 fi
-exit 0
 
 exit 0

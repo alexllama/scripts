@@ -1,6 +1,6 @@
 # git-watch
 
-Monitors all git repositories under `$HOME` nightly (and on demand). Discovers repos automatically with `fd`, explicitly tracks your bare dotfiles repo at `$HOME/.cfg` with worktree `$HOME`, reports dirty files and sync state with upstream, and alerts you via notification with a full report.
+Monitors all git repositories under `$HOME` on demand. Discovers repos automatically with `fd`, explicitly tracks your bare dotfiles repo at `$HOME/.cfg` with worktree `$HOME`, reports dirty files and sync state with upstream, and writes a full report. Run it with `--print` to echo the report to the terminal.
 
 The folder also contains `git-updater`, the backend for updating repos in place (no `cd` required), intended to power an Omarchy plugin UI.
 
@@ -13,7 +13,7 @@ For each repo found under `$HOME`:
 4. **Local changes (dirty)** - Runs `git status --porcelain`. Counts modified/staged/untracked files. These are "unchecked code" that needs to be committed.
 5. **Fetch from upstream** - Runs `git fetch --quiet --all` with a 300s timeout. Captures all errors (including SSH/auth failures, timeouts, network issues).
 6. **Ahead/Behind** - After fetch, compares `HEAD` with upstream via `git rev-list`. Shows `+ahead/-behind` relative to upstream.
-7. **Reporting** - Writes full report to `~/.local/state/git-watch/last-report.md` (overwritten each run - no history kept). Dirty/behind/error repos appear first, clean repos at the end. Notification shows summary and report path.
+7. **Reporting** - Writes full report to `~/.local/state/git-watch/last-report.md` (overwritten each run - no history kept). Dirty/behind/error repos appear first, clean repos at the end. Use `--print` to echo the report to the terminal.
 
 ## Report structure
 
@@ -116,7 +116,7 @@ fi
 
 ## JSON output (for UIs)
 
-`git-watch --json` emits the same discovery/status data as structured JSON on stdout, without writing the report or sending a notification. This is the machine-readable backend for `git-updater` and any future plugin UI.
+`git-watch --json` emits the same discovery/status data as structured JSON on stdout. This is the machine-readable backend for `git-updater` and any future plugin UI.
 
 ```json
 {
@@ -184,9 +184,10 @@ The status is cached in `/tmp/git-updater-cache.json`; run `git-updater refresh`
 
 ### Manual run
 ```bash
-git-watch
+git-watch            # write the report
+git-watch --print    # write the report and echo it to the terminal
 # or
-/home/alex/dev/scripts/git-watch/git-watch
+/home/alex/dev/scripts/git-watch/git-watch --print
 ```
 
 ### View report
@@ -196,13 +197,16 @@ cat ~/.local/state/git-watch/last-report.md
 micro ~/.local/state/git-watch/last-report.md
 ```
 
-### Enable automatic nightly runs
-Already enabled:
+### Automatic nightly runs (optional)
+The timer is installed but disabled. To enable it:
 ```bash
-systemctl --user status git-watch.timer
+systemctl --user enable --now git-watch.timer
 ```
 
-Runs nightly at ~03:00 with 15m jitter. Timer is persistent.
+It runs nightly at ~03:00 with 15m jitter. The timer is persistent. To disable it again:
+```bash
+systemctl --user disable --now git-watch.timer
+```
 
 ## Notes
 
