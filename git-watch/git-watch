@@ -121,6 +121,39 @@ mapfile -t discovered < <(
   } | sort -u
 )
 
+# Paths to ignore entirely (vendored dependencies / tool-managed checkouts).
+# These are not your code, so reporting them as "needs commit" is noise.
+# Override or extend with "exclude:<glob>" lines in the config file.
+exclude_globs=(
+  "$HOME_DIR/.local/share/nvim/lazy/*"
+  "$HOME_DIR/.cargo/git/*"
+  "$HOME_DIR/.gemini/*"
+  "$HOME_DIR/.local/share/mise/*"
+  "$HOME_DIR/.local/share/Trash/*"
+  "$HOME_DIR/.local/state/*"
+  "$HOME_DIR/.npm/*"
+  "$HOME_DIR/.cache/*"
+)
+if [[ -f "$CONFIG" ]]; then
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*exclude: ]] || continue
+    pat="${line#*exclude:}"
+    pat="${pat//\$HOME/$HOME_DIR}"
+    pat="${pat#"${pat%%[![:space:]]*}"}"
+    pat="${pat%"${pat##*[![:space:]]}"}"
+    [[ -n "$pat" ]] && exclude_globs+=("$pat")
+  done < "$CONFIG"
+fi
+
+is_excluded() {
+  local p="$1" g
+  for g in "${exclude_globs[@]}"; do
+    # shellcheck disable=SC2053
+    [[ "$p" == $g ]] && return 0
+  done
+  return 1
+}
+
 # Build list of repos to check
 repos_list=()
 for entry in "${discovered[@]}"; do
@@ -132,6 +165,10 @@ for entry in "${discovered[@]}"; do
   fi
   # normal repo candidate
   repo_root="$entry"
+  if is_excluded "$repo_root"; then
+    log "Excluded from report: $repo_root"
+    continue
+  fi
   # Verify it's a git repo
   if git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1; then
     repos_list+=("NORMAL|$repo_root|")
@@ -171,6 +208,8 @@ summary_repos=0
 declare -a dirty_repos=()
 declare -a clean_repos=()
 declare -a all_repo_data=()
+declare -A repo_errors=()
+declare -A repo_dirty=()
 
 # Function to run git with appropriate env
 run_git() {
@@ -213,6 +252,8 @@ for entry in "${unique_repos[@]}"; do
   ahead=0
   behind=0
   branch=""
+  branch_display=""
+  detached=0
   upstream=""
   proto="none"
   remote_url=""
@@ -232,6 +273,11 @@ for entry in "${unique_repos[@]}"; do
   else
     errors_repo+=("Failed to get branch: $branch")
     branch="unknown"
+  fi
+  branch_display="$branch"
+  if [[ "$branch" == "HEAD" ]]; then
+    detached=1
+    branch_display="HEAD (detached)"
   fi
   
   # Check dirty status
@@ -278,8 +324,13 @@ for entry in "${unique_repos[@]}"; do
   fi
   
   # Check upstream
-  if [[ $fetch_rc -eq 0 || -n "$(run_git "$rtype" "$gdir" "$wtree" rev-parse --abbrev-ref '@{u}' 2>/dev/null)" ]]; then
-    if upstream=$(run_git "$rtype" "$gdir" "$wtree" rev-parse --abbrev-ref '@{u}' 2>&1); then
+  if [[ $detached -eq 1 ]]; then
+    # Pinned checkouts (e.g. lazy.nvim plugins) have no branch and no upstream.
+    upstream="none"
+    ahead=0
+    behind=0
+  elif [[ $fetch_rc -eq 0 || -n "$(run_git "$rtype" "$gdir" "$wtree" rev-parse --abbrev-ref '@{u}' 2>/dev/null)" ]]; then
+    if upstream=$(run_git "$rtype" "$gdir" "$wtree" rev-parse --abbrev-ref '@{u}' 2>/dev/null); then
       if [[ "$upstream" != "@{u}" && -n "$upstream" ]]; then
         # Calculate ahead/behind
         if behind=$(run_git "$rtype" "$gdir" "$wtree" rev-list --count HEAD.."$upstream" 2>&1); then
@@ -311,8 +362,9 @@ for entry in "${unique_repos[@]}"; do
         behind=0
       fi
     else
+      upstream_err=$(run_git "$rtype" "$gdir" "$wtree" rev-parse --abbrev-ref '@{u}' 2>&1 >/dev/null)
       upstream="none"
-      errors_repo+=("No upstream configured or failed to get upstream: $upstream")
+      errors_repo+=("No upstream configured or failed to get upstream: ${upstream_err:-unknown error}")
     fi
   else
     upstream="unknown (fetch failed)"
@@ -336,13 +388,17 @@ for entry in "${unique_repos[@]}"; do
   
   # Store result for later sorting
   errors_str=$(printf '%s;' "${errors_repo[@]}")
+  if [[ ${#errors_repo[@]} -gt 0 ]]; then
+    repo_errors["$display_path"]=$(printf '%s\n' "${errors_repo[@]}")
+  fi
+  repo_dirty["$display_path"]="$dirty_out"
   dirty_b64=$(printf '%s' "$dirty_out" | base64 -w0 2>/dev/null || printf '%s' "$dirty_out" | base64 | tr -d '\n')
   all_repo_data+=("$display_path|$rtype|$gdir|$wtree|$proto|$branch|$upstream|$dirty_count|$ahead|$behind|$error_flag|$remote_url|$errors_str|$dirty_b64")
   
   if [[ $dirty_count -gt 0 || $behind -gt 0 || ${#errors_repo[@]} -gt 0 ]]; then
-    dirty_repos+=("$display_path|$rtype|$proto|$branch|$upstream|$dirty_count|$ahead|$behind|$error_flag|$gdir|$wtree|$remote_url|$dirty_out")
+    dirty_repos+=("$display_path|$rtype|$proto|$branch_display|$upstream|$dirty_count|$ahead|$behind|$error_flag|$gdir|$wtree|$remote_url|$dirty_out")
   else
-    clean_repos+=("$display_path|$rtype|$proto|$branch|$upstream|$dirty_count|$ahead|$behind|$error_flag|$gdir|$wtree|$remote_url|")
+    clean_repos+=("$display_path|$rtype|$proto|$branch_display|$upstream|$dirty_count|$ahead|$behind|$error_flag|$gdir|$wtree|$remote_url|")
   fi
   
 done
@@ -427,10 +483,12 @@ fi
     echo ""
   else
     {
-      echo "REPO|TYPE|PROTO|BRANCH|UPSTREAM|DIRTY|AHEAD/BEHIND|ERRORS"
+      echo "REPO|PROTO|BRANCH|UPSTREAM|DIRTY|AHEAD/BEHIND|ERRORS"
       for entry in "${dirty_repos[@]}"; do
         IFS='|' read -r dpath drtype dproto dbranch dupstream ddirty dahead dbehind derrorflag dgdir dwtree dremote ddout <<< "$entry"
-        echo "${dpath}|${drtype}|${dproto}|${dbranch}|${dupstream}|${ddirty}|+${dahead}/-${dbehind}|${derrorflag}"
+        drepo="$dpath"
+        [[ "$drtype" == "BARE" ]] && drepo="$dpath (Bare)"
+        echo "${drepo}|${dproto}|${dbranch}|${dupstream}|${ddirty}|+${dahead}/-${dbehind}|${derrorflag}"
       done
     } | column -t -s '|' 
     echo ""
@@ -438,8 +496,9 @@ fi
     for entry in "${dirty_repos[@]}"; do
       IFS='|' read -r dpath drtype dproto dbranch dupstream ddirty dahead dbehind derrorflag dgdir dwtree dremote ddout <<< "$entry"
       echo ""
-      echo "#### $dpath"
-      echo "- Type: $drtype"
+      drepo="$dpath"
+      [[ "$drtype" == "BARE" ]] && drepo="$dpath (Bare)"
+      echo "#### $drepo"
       echo "- Git dir: $dgdir"
       [[ -n "$dwtree" ]] && echo "- Worktree: $dwtree"
       echo "- Protocol: $dproto"
@@ -449,11 +508,18 @@ fi
       echo "- Dirty files: $ddirty"
       echo "- Ahead/Behind: +$dahead / -$dbehind"
       echo "- Errors: $derrorflag"
+      if [[ -n "${repo_errors[$dpath]:-}" ]]; then
+        echo ""
+        echo "##### Error details"
+        echo '```'
+        echo "${repo_errors[$dpath]}"
+        echo '```'
+      fi
       echo ""
-      if [[ $ddirty -gt 0 && -n "$ddout" ]]; then
+      if [[ $ddirty -gt 0 && -n "${repo_dirty[$dpath]:-}" ]]; then
         echo "##### Uncommitted changes"
         echo '```'
-        echo "$ddout"
+        echo "${repo_dirty[$dpath]}"
         echo '```'
         echo ""
       fi
@@ -468,10 +534,12 @@ fi
     echo ""
   else
     {
-      echo "REPO|TYPE|PROTO|BRANCH|UPSTREAM|DIRTY|AHEAD/BEHIND|ERRORS"
+      echo "REPO|PROTO|BRANCH|UPSTREAM|DIRTY|AHEAD/BEHIND|ERRORS"
       for entry in "${clean_repos[@]}"; do
         IFS='|' read -r cpath crtype cproto cbranch cupstream cdirty cahead cbehind cerrorflag cgdir cwtree cremote ccdout <<< "$entry"
-        echo "${cpath}|${crtype}|${cproto}|${cbranch}|${cupstream}|${cdirty}|+${cahead}/-${cbehind}|${cerrorflag}"
+        crepo="$cpath"
+        [[ "$crtype" == "BARE" ]] && crepo="$cpath (Bare)"
+        echo "${crepo}|${cproto}|${cbranch}|${cupstream}|${cdirty}|+${cahead}/-${cbehind}|${cerrorflag}"
       done
     } | column -t -s '|' 
     echo ""
